@@ -142,14 +142,18 @@ def predict():
         # ── Risk level ────────────────────────────────────
         if prob >= 0.7:
             risk = 'High'
+            prediction_code = 'HIGH_RISK'      # ← NOUVEAU
         elif prob >= 0.4:
             risk = 'Medium'
+            prediction_code = 'MEDIUM_RISK'    # ← NOUVEAU
         else:
             risk = 'Low'
+            prediction_code = 'LOW_RISK'       # ← NOUVEAU
 
         return jsonify({
             'recurrence_probability': round(prob * 100, 1),
             'risk_level': risk,
+            'prediction_code': prediction_code,  # ← NOUVEAU (pour la traduction)
             'model_used': model_used
         })
 
