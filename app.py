@@ -1,4 +1,5 @@
 
+import os
 import pandas as pd
 import numpy as np
 import joblib
@@ -65,6 +66,7 @@ def encode(data: dict) -> pd.DataFrame:
             columns=nominal_encoder.get_feature_names_out(cols_to_onehot),
             index=df.index
         )
+        # Drop __MISSING__ columns if any crept in
         missing_cols = [c for c in encoded.columns if '__MISSING__' in c]
         encoded = encoded.drop(columns=missing_cols)
 
@@ -114,6 +116,7 @@ def predict():
             df_encoded = encode(full_data)
             df_encoded = df_encoded.reindex(columns=full_cols, fill_value=np.nan)
 
+            # Impute missing values
             df_ready = pd.DataFrame(
                 imputer_full.transform(df_encoded),
                 columns=full_cols
@@ -127,6 +130,7 @@ def predict():
             df_encoded = encode(clinical_data)
             df_encoded = df_encoded.reindex(columns=clinical_cols, fill_value=np.nan)
 
+            # Impute missing values
             df_ready = pd.DataFrame(
                 imputer_clinical.transform(df_encoded),
                 columns=clinical_cols
@@ -135,12 +139,17 @@ def predict():
             prob = float(model_clinical.predict_proba(df_ready)[:, 1][0])
             model_used = "Clinical model (no genomic data)"
 
-        # ── Binary prediction at 0.5 threshold ───────────
-        prediction = 'Recurrence likely' if prob >= 0.5 else 'Recurrence unlikely'
+        # ── Risk level ────────────────────────────────────
+        if prob >= 0.7:
+            risk = 'High'
+        elif prob >= 0.4:
+            risk = 'Medium'
+        else:
+            risk = 'Low'
 
         return jsonify({
             'recurrence_probability': round(prob * 100, 1),
-            'prediction': prediction,
+            'risk_level': risk,
             'model_used': model_used
         })
 
@@ -154,4 +163,5 @@ def health():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
