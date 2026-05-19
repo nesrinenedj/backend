@@ -4,8 +4,8 @@ import joblib
 import json
 
 # ── Load everything once at startup ──────────────────────
-model_full     = joblib.load('model_full.pkl')
-model_clinical = joblib.load('model_clinical.pkl')
+model_full     = joblib.load('model_knn_adasyn_full.pkl')
+model_clinical = joblib.load('model_knn_adasyn_clinical.pkl')
 
 with open('full_cols.json') as f:
     full_cols = json.load(f)

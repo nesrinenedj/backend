@@ -1,5 +1,5 @@
 
-import os
+
 import pandas as pd
 import numpy as np
 import joblib
@@ -11,8 +11,8 @@ app = Flask(__name__)
 CORS(app)
 
 # ── Load everything once at startup ──────────────────────
-model_full          = joblib.load('model_full.pkl')
-model_clinical      = joblib.load('model_clinical.pkl')
+model_full          = joblib.load('model_knn_adasyn_full.pkl')
+model_clinical      = joblib.load('model_knn_adasyn_clinical.pkl')
 ordinal_encoder     = joblib.load('ordinal_encoder.pkl')
 nominal_encoder     = joblib.load('nominal_encoder.pkl')
 imputer_full        = joblib.load('imputer_full.pkl')
@@ -66,7 +66,7 @@ def encode(data: dict) -> pd.DataFrame:
             columns=nominal_encoder.get_feature_names_out(cols_to_onehot),
             index=df.index
         )
-        # Drop __MISSING__ columns if any crept in
+
         missing_cols = [c for c in encoded.columns if '__MISSING__' in c]
         encoded = encoded.drop(columns=missing_cols)
 
@@ -116,7 +116,7 @@ def predict():
             df_encoded = encode(full_data)
             df_encoded = df_encoded.reindex(columns=full_cols, fill_value=np.nan)
 
-            # Impute missing values
+
             df_ready = pd.DataFrame(
                 imputer_full.transform(df_encoded),
                 columns=full_cols
@@ -130,7 +130,7 @@ def predict():
             df_encoded = encode(clinical_data)
             df_encoded = df_encoded.reindex(columns=clinical_cols, fill_value=np.nan)
 
-            # Impute missing values
+
             df_ready = pd.DataFrame(
                 imputer_clinical.transform(df_encoded),
                 columns=clinical_cols
@@ -139,21 +139,12 @@ def predict():
             prob = float(model_clinical.predict_proba(df_ready)[:, 1][0])
             model_used = "Clinical model (no genomic data)"
 
-        # ── Risk level ────────────────────────────────────
-        if prob >= 0.7:
-            risk = 'High'
-            prediction_code = 'HIGH_RISK'      # ← NOUVEAU
-        elif prob >= 0.4:
-            risk = 'Medium'
-            prediction_code = 'MEDIUM_RISK'    # ← NOUVEAU
-        else:
-            risk = 'Low'
-            prediction_code = 'LOW_RISK'       # ← NOUVEAU
+        # ── Binary prediction at 0.5 threshold ───────────
+        prediction = 'Recurrence likely' if prob >= 0.5 else 'Recurrence unlikely'
 
         return jsonify({
             'recurrence_probability': round(prob * 100, 1),
-            'risk_level': risk,
-            'prediction_code': prediction_code,  # ← NOUVEAU (pour la traduction)
+            'prediction': prediction,
             'model_used': model_used
         })
 
@@ -167,5 +158,4 @@ def health():
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(debug=True, port=5000)
