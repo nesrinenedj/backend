@@ -1,5 +1,3 @@
-
-
 import pandas as pd
 import numpy as np
 import joblib
@@ -116,7 +114,6 @@ def predict():
             df_encoded = encode(full_data)
             df_encoded = df_encoded.reindex(columns=full_cols, fill_value=np.nan)
 
-
             df_ready = pd.DataFrame(
                 imputer_full.transform(df_encoded),
                 columns=full_cols
@@ -130,7 +127,6 @@ def predict():
             df_encoded = encode(clinical_data)
             df_encoded = df_encoded.reindex(columns=clinical_cols, fill_value=np.nan)
 
-
             df_ready = pd.DataFrame(
                 imputer_clinical.transform(df_encoded),
                 columns=clinical_cols
@@ -141,10 +137,23 @@ def predict():
 
         # ── Binary prediction at 0.5 threshold ───────────
         prediction = 'Recurrence likely' if prob >= 0.5 else 'Recurrence unlikely'
+        
+        # ── Risk level for frontend translation ───────────
+        if prob >= 0.5:
+            risk_level = "High"
+            prediction_code = "HIGH_RISK"
+        elif prob >= 0.25:
+            risk_level = "Medium"
+            prediction_code = "MEDIUM_RISK"
+        else:
+            risk_level = "Low"
+            prediction_code = "LOW_RISK"
 
         return jsonify({
             'recurrence_probability': round(prob * 100, 1),
             'prediction': prediction,
+            'risk_level': risk_level,
+            'prediction_code': prediction_code,
             'model_used': model_used
         })
 
