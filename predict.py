@@ -2,10 +2,19 @@ import pandas as pd
 import numpy as np
 import joblib
 import json
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)
 
 # ── Load everything once at startup ──────────────────────
-model_full     = joblib.load('model_knn_adasyn_full.pkl')
-model_clinical = joblib.load('model_knn_adasyn_clinical.pkl')
+model_full          = joblib.load('model_knn_adasyn_full.pkl')
+model_clinical      = joblib.load('model_knn_adasyn_clinical.pkl')
+ordinal_encoder     = joblib.load('ordinal_encoder.pkl')
+nominal_encoder     = joblib.load('nominal_encoder.pkl')
+imputer_full        = joblib.load('imputer_full.pkl')
+imputer_clinical    = joblib.load('imputer_clinical.pkl')
 
 with open('full_cols.json') as f:
     full_cols = json.load(f)
@@ -16,99 +25,146 @@ with open('clinical_cols.json') as f:
 with open('gene_cols.json') as f:
     gene_cols = json.load(f)
 
+# ── Column definitions ────────────────────────────────────
+ordinal_col_names = [
+    'T_STAGE', 'N_STAGE', 'M_STAGE', 'STAGE_AT_DIAGNOSIS',
+    'OVERALL_TUMOR_GRADE', 'PRIMARY_NUCLEAR_GRADE',
+    'MENOPAUSAL_STATUS_AT_DIAGNOSIS', 'HER2_STATUS_PRIMARY',
+    'OVERALL_HER2_STATUS'
+]
 
-def predict_recurrence(clinical_data: dict, gene_data: dict = None):
+nominal_col_names = [
+    'OVERALL_RECEPTOR_STATUS_PATIENT',
+    'SEX',
+    'LATERALITY',
+    'RECEPTOR_STATUS_PRIMARY',
+    'TUMOR_SAMPLE_HISTOLOGY'
+]
+
+
+def encode(data: dict) -> pd.DataFrame:
     """
-    clinical_data : dict of clinical feature values (required)
-    gene_data     : dict of gene mutation values 0/1 (optional)
-
-    Returns: probability, risk level, model used
+    Takes raw clinical data (strings + numbers from frontend),
+    applies ordinal encoding and nominal encoding.
+    Returns a dataframe with encoded columns, NaN still present.
     """
+    df = pd.DataFrame([data])
 
-    if gene_data is not None:
-        # ── Full prediction (clinical + genomic) ──────
-        full_data = {**clinical_data, **gene_data}
-        full_data['mutation_burden'] = sum(gene_data.values())
+    # ── 1. Ordinal encoding ───────────────────────────────
+    cols_to_encode = [c for c in ordinal_col_names if c in df.columns]
+    if cols_to_encode:
+        df[cols_to_encode] = ordinal_encoder.transform(df[cols_to_encode])
 
-        df_input = pd.DataFrame([full_data])
-        df_input = df_input.reindex(columns=full_cols, fill_value=0)
+    # ── 2. Nominal encoding ───────────────────────────────
+    cols_to_onehot = [c for c in nominal_col_names if c in df.columns]
+    if cols_to_onehot:
+        nominal_input = df[cols_to_onehot].fillna('__MISSING__')
+        encoded = pd.DataFrame(
+            nominal_encoder.transform(nominal_input),
+            columns=nominal_encoder.get_feature_names_out(cols_to_onehot),
+            index=df.index
+        )
 
-        prob = float(model_full.predict_proba(df_input)[:, 1][0])
-        model_used = "Full model (clinical + genomic)"
+        missing_cols = [c for c in encoded.columns if '__MISSING__' in c]
+        encoded = encoded.drop(columns=missing_cols)
 
-    else:
-        # ── Clinical only prediction ──────────────────
-        df_input = pd.DataFrame([clinical_data])
-        df_input = df_input.reindex(columns=clinical_cols, fill_value=0)
+        df = df.drop(columns=cols_to_onehot)
+        df = pd.concat([df, encoded], axis=1)
 
-        prob = float(model_clinical.predict_proba(df_input)[:, 1][0])
-        model_used = "Clinical model (no genomic data)"
-
-    # Risk level
-    if prob >= 0.7:
-        risk = 'High'
-    elif prob >= 0.4:
-        risk = 'Medium'
-    else:
-        risk = 'Low'
-
-    return {
-        'recurrence_probability': round(prob * 100, 1),
-        'risk_level': risk,
-        'model_used': model_used
-    }
+    return df
 
 
-# ── Test 1: Clinical only ─────────────────────────────────
-result = predict_recurrence(
-    clinical_data={
-        'T_STAGE': 6.0,
-        'N_STAGE': 3.0,
-        'M_STAGE': 0.0,
-        'HER2_STATUS_PRIMARY': 1.0,
-        'MENOPAUSAL_STATUS_AT_DIAGNOSIS': 1.0,
-        'STAGE_AT_DIAGNOSIS': 2.0,
-        'OVERALL_TUMOR_GRADE': 2.0,
-        'PRIMARY_NUCLEAR_GRADE': 2.0,
-        'ER_PCT_PRIMARY': 90.0,
-        'PR_PCT_PRIMARY': 80.0,
-        'OVERALL_HER2_STATUS': 0.0,
-        'INVASIVE_CARCINOMA_DX_AGE': 52,
-        'OVERALL_RECEPTOR_STATUS_PATIENT_HR+/HER2-': 1,
-        'RECEPTOR_STATUS_PRIMARY_HR+/HER2-': 1,
-        'TUMOR_SAMPLE_HISTOLOGY_Breast Invasive Ductal Carcinoma': 1,
-        'LATERALITY_Left': 1,
-    },
-    gene_data=None
-)
-print("Test 1 (clinical only):", result)
+@app.route('/predict', methods=['POST'])
+def predict():
+    try:
+        body = request.get_json()
+
+        if not body:
+            return jsonify({'error': 'Request body is empty'}), 400
+
+        clinical_data = body.get('clinical')
+        gene_data     = body.get('genes', None)
+
+        if not clinical_data:
+            return jsonify({'error': 'Missing required field: clinical'}), 400
+
+        # ── Validate required clinical fields ─────────────
+        required_fields = [
+            'T_STAGE', 'N_STAGE', 'M_STAGE', 'STAGE_AT_DIAGNOSIS',
+            'INVASIVE_CARCINOMA_DX_AGE', 'SEX',
+            'MENOPAUSAL_STATUS_AT_DIAGNOSIS', 'LATERALITY',
+            'OVERALL_TUMOR_GRADE', 'PRIMARY_NUCLEAR_GRADE',
+            'HER2_STATUS_PRIMARY', 'OVERALL_HER2_STATUS',
+            'OVERALL_RECEPTOR_STATUS_PATIENT',
+            'RECEPTOR_STATUS_PRIMARY', 'TUMOR_SAMPLE_HISTOLOGY'
+        ]
+
+        for field in required_fields:
+            if field not in clinical_data:
+                return jsonify({'error': f'Missing required field: {field}'}), 400
+
+        if gene_data is not None:
+            # ── Full model (clinical + genomic) ───────────
+            gene_dict = {g: 0 for g in gene_cols if g != 'mutation_burden'}
+            gene_dict.update({k: v for k, v in gene_data.items()
+                              if k in gene_dict})
+            gene_dict['mutation_burden'] = sum(gene_dict.values())
+
+            full_data  = {**clinical_data, **gene_dict}
+            df_encoded = encode(full_data)
+            df_encoded = df_encoded.reindex(columns=full_cols, fill_value=np.nan)
+
+            df_ready = pd.DataFrame(
+                imputer_full.transform(df_encoded),
+                columns=full_cols
+            )
+
+            prob = float(model_full.predict_proba(df_ready)[:, 1][0])
+            model_used = "Full model (clinical + genomic)"
+
+        else:
+            # ── Clinical only model ───────────────────────
+            df_encoded = encode(clinical_data)
+            df_encoded = df_encoded.reindex(columns=clinical_cols, fill_value=np.nan)
+
+            df_ready = pd.DataFrame(
+                imputer_clinical.transform(df_encoded),
+                columns=clinical_cols
+            )
+
+            prob = float(model_clinical.predict_proba(df_ready)[:, 1][0])
+            model_used = "Clinical model (no genomic data)"
+
+        # ── Binary prediction at 0.5 threshold ───────────
+        prediction = 'Recurrence likely' if prob >= 0.5 else 'Recurrence unlikely'
+        
+        # ── Risk level for frontend translation ───────────
+        if prob >= 0.5:
+            risk_level = "High"
+            prediction_code = "HIGH_RISK"
+        elif prob >= 0.25:
+            risk_level = "Medium"
+            prediction_code = "MEDIUM_RISK"
+        else:
+            risk_level = "Low"
+            prediction_code = "LOW_RISK"
+
+        return jsonify({
+            'recurrence_probability': round(prob * 100, 1),
+            'prediction': prediction,
+            'risk_level': risk_level,
+            'prediction_code': prediction_code,
+            'model_used': model_used
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
-# ── Test 2: Full (clinical + genomic) ────────────────────
-result_full = predict_recurrence(
-    clinical_data={
-        'T_STAGE': 6.0,
-        'N_STAGE': 3.0,
-        'M_STAGE': 0.0,
-        'HER2_STATUS_PRIMARY': 1.0,
-        'MENOPAUSAL_STATUS_AT_DIAGNOSIS': 1.0,
-        'STAGE_AT_DIAGNOSIS': 2.0,
-        'OVERALL_TUMOR_GRADE': 2.0,
-        'PRIMARY_NUCLEAR_GRADE': 2.0,
-        'ER_PCT_PRIMARY': 90.0,
-        'PR_PCT_PRIMARY': 80.0,
-        'OVERALL_HER2_STATUS': 0.0,
-        'INVASIVE_CARCINOMA_DX_AGE': 52,
-        'OVERALL_RECEPTOR_STATUS_PATIENT_HR+/HER2-': 1,
-        'RECEPTOR_STATUS_PRIMARY_HR+/HER2-': 1,
-        'TUMOR_SAMPLE_HISTOLOGY_Breast Invasive Ductal Carcinoma': 1,
-        'LATERALITY_Left': 1,
-    },
-    gene_data={
-        'PIK3CA': 1,
-        'TP53': 0,
-        'CDH1': 0,
-        # all other genes default to 0 automatically
-    }
-)
-print("Test 2 (full model):   ", result_full)
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'ok'})
+
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
